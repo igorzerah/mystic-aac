@@ -52,25 +52,108 @@ router.get('/login',
 
 // Rota para processar o login
 router.post('/login', asyncHandler(async (req: Request, res: Response) => {
-  // Validação de entrada
-  const { username, password } = LoginSchema.parse(req.body);
+  try {
+    const { username, password } = LoginSchema.parse(req.body);
 
-  // Rate limiting
-  if (!RateLimiter.checkLoginAttempts(username)) {
-    const remainingTime = RateLimiter.getRemainingBlockTime(username);
-    throw new AppError(`Muitas tentativas. Tente novamente em ${remainingTime} minutos.`, 429);
+    console.log('Login attempt:', { 
+      username, 
+      sessionId: req.sessionID,
+      nodeEnv: process.env.NODE_ENV
+    });
+
+    if (!RateLimiter.checkLoginAttempts(username)) {
+      const remainingBlockTime = RateLimiter.getRemainingBlockTime(username);
+      return res.status(429).render('pages/login', {
+        title: 'Login',
+        error: `Muitas tentativas de login. Tente novamente em ${remainingBlockTime} minuto(s).`
+      });
+    }
+
+    const sessionUser = await AuthService.validateLogin(username, password);
+    
+    console.log('User validated:', { 
+      userId: sessionUser.id, 
+      username: sessionUser.username,
+      sessionId: req.sessionID,
+      nodeEnv: process.env.NODE_ENV,
+      sessionConfig: JSON.stringify({
+        sessionExists: !!req.session,
+        sessionId: req.sessionID,
+        cookieConfig: req.session?.cookie
+      }, null, 2)
+    });
+
+    // Regenerar sessão de forma síncrona
+    return new Promise<void>((resolve, reject) => {
+      req.session.regenerate((err) => {
+        if (err) {
+          console.error('Erro ao regenerar sessão em produção:', {
+            error: err,
+            nodeEnv: process.env.NODE_ENV
+          });
+          logger.error('Erro ao regenerar sessão:', err);
+          return res.status(500).render('pages/error', {
+            title: 'Erro de Sessão',
+            message: 'Não foi possível iniciar a sessão. Tente novamente.'
+          });
+        }
+
+        // Definir usuário na sessão
+        req.session.user = {
+          id: sessionUser.id,
+          username: sessionUser.username,
+          email: sessionUser.email,
+          role: sessionUser.role,
+          isActive: sessionUser.isActive,
+          lastLogin: sessionUser.lastLogin,
+          createdAt: sessionUser.createdAt,
+          updatedAt: sessionUser.updatedAt
+        };
+
+        console.log('Sessão criada em produção:', {
+          sessionId: req.sessionID,
+          user: JSON.stringify(req.session.user, null, 2),
+          nodeEnv: process.env.NODE_ENV
+        });
+
+        // Atualizar último login
+        AuthService.updateLastLogin(sessionUser.id)
+          .then(() => {
+            res.redirect('/dashboard');
+            resolve();
+          })
+          .catch((updateError) => {
+            console.error('Erro ao atualizar último login em produção:', {
+              error: updateError,
+              nodeEnv: process.env.NODE_ENV
+            });
+            logger.error('Erro ao atualizar último login:', updateError);
+            res.redirect('/dashboard');
+            resolve();
+          });
+      });
+    });
+  } catch (error) {
+    console.error('Erro no processo de login em produção:', {
+      error,
+      nodeEnv: process.env.NODE_ENV
+    });
+
+    logger.error('Erro no processo de login:', error);
+
+    if (error instanceof AppError) {
+      return res.status(error.statusCode).render('pages/login', {
+        title: 'Erro de Login',
+        error: error.message
+      });
+    }
+
+    // Erro genérico
+    return res.status(500).render('pages/error', {
+      title: 'Erro de Login',
+      message: 'Ocorreu um erro inesperado. Tente novamente.'
+    });
   }
-
-  // Autenticar usuário
-  const sessionUser = await AuthService.validateLogin(username, password);
-
-  // Atualizar sessão
-  req.session.user = sessionUser as any;
-
-  // Atualizar último login
-  await AuthService.updateLastLogin(sessionUser.id);
-
-  res.redirect('/dashboard');
 }));
 
 // Rota para recuperação de senha
@@ -161,20 +244,20 @@ router.get('/logout', (req: Request, res: Response) => {
   // Registrar logout
   const username = req.session.user?.username || 'Usuário Desconhecido';
   
-  // Destruir sessão
+  // Destruir sessão de forma segura
   req.session.destroy((err) => {
     if (err) {
       logger.error(`Erro ao fazer logout para ${username}:`, err);
-      throw new AppError('Não foi possível fazer logout. Tente novamente.', 500);
+      return res.status(500).redirect('/');
     }
-    
+
     // Limpar cookie de sessão
     res.clearCookie('connect.sid');
     
-    // Log de logout bem-sucedido
+    // Log de logout
     logger.info(`Logout bem-sucedido para ${username}`);
     
-    // Redirecionar para página inicial com mensagem de sucesso
+    // Redirecionar para página inicial
     res.redirect('/');
   });
 });

@@ -4,12 +4,12 @@
     <div class="dashboard-sidebar">
         <div class="dashboard-profile">
             <img src="<%= player && player.avatar ? player.avatar : '/images/default-avatar.png' %>" alt="Avatar" class="dashboard-profile-image">
-            <div class="dashboard-profile-name"><%= user.username %></div>
+            <div class="dashboard-profile-name"><%= player ? player.name : user.username %></div>
             <div class="dashboard-profile-level">
                 <% if (player) { %>
-                    Nível <%= player.level %> | <%= player.vocation %>
+                    Nível <%= player.level || 1 %> | <%= player.vocation %>
                 <% } else { %>
-                    Sem personagem
+                    Nível 1
                 <% } %>
             </div>
         </div>

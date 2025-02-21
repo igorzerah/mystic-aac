@@ -14,10 +14,33 @@ const ROLE_HIERARCHY: Record<UserRole, number> = {
 };
 
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
+  // Detailed diagnostic logging
+  console.log('Middleware de autenticação:', {
+    sessionExists: !!req.session,
+    userExists: !!req.session?.user,
+    path: req.path,
+    sessionData: req.session // Log full session data for debugging
+  });
+
+  // Verificações múltiplas de autenticação
+  if (!req.session) {
+    logger.warn('Sessão não inicializada');
+    return res.status(401).redirect('/login');
+  }
+
   if (!req.session.user) {
     logger.warn('Tentativa de acesso não autenticado');
-    return res.redirect('/login');
+    console.log('Session details:', req.session); // Add this line for more context
+    return res.status(401).redirect('/login');
   }
+
+  // Verificação adicional de integridade do usuário
+  if (!req.session.user.id || !req.session.user.username) {
+    logger.error('Dados de usuário inválidos na sessão');
+    delete req.session.user;
+    return res.status(401).redirect('/login');
+  }
+
   next();
 };
 

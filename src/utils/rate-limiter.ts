@@ -49,6 +49,15 @@ export class RateLimiter {
     const elapsedTime = now - userAttempts.lastAttempt;
     const remainingTime = (BLOCK_DURATION_MINUTES * 60 * 1000) - elapsedTime;
 
-    return Math.max(0, Math.ceil(remainingTime / (60 * 1000)));
+    // Converter para minutos e arredondar para cima
+    return Math.ceil(remainingTime / (60 * 1000));
+  }
+
+  /**
+   * Limpa as tentativas de login para um usuário específico
+   * @param username Nome de usuário
+   */
+  static clearLoginAttempts(username: string): void {
+    loginAttempts.delete(username);
   }
 }

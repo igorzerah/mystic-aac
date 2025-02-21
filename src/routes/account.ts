@@ -81,74 +81,96 @@ router.get('/login', (req: any, res: any) => {
 
 // Rota para processar o login
 router.post('/login', async (req: any, res: any, next: any) => {
-    try {
-        const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-        // Validações básicas
-        if (!username || !password) {
-            return res.render('pages/login', { 
-                title: 'Login', 
-                error: 'Usuário e senha são obrigatórios' 
-            });
-        }
+    // Validações básicas
+    if (!username || !password) {
+      return res.render('pages/login', { 
+        title: 'Login', 
+        error: 'Usuário e senha são obrigatórios' 
+      });
+    }
 
-        // Buscar usuário
-        const account = await prisma.account.findUnique({
-            where: { username }
+    // Buscar usuário
+    const account = await prisma.account.findUnique({
+      where: { username }
+    });
+
+    if (!account) {
+      return res.render('pages/login', { 
+        title: 'Login', 
+        error: 'Usuário não encontrado' 
+      });
+    }
+
+    // Verificar senha
+    const isPasswordValid = await bcrypt.compare(password, account.password);
+
+    if (!isPasswordValid) {
+      return res.render('pages/login', { 
+        title: 'Login', 
+        error: 'Senha incorreta' 
+      });
+    }
+
+    // Verificação de sessão com tratamento detalhado
+    return new Promise<void>((resolve, reject) => {
+      // Verificação explícita da sessão
+      if (!req.session) {
+        console.error('Sessão não inicializada');
+        return res.status(500).render('pages/error', {
+          title: 'Erro de Sessão',
+          message: 'Não foi possível iniciar a sessão. Tente novamente.'
         });
+      }
 
-        if (!account) {
-            return res.render('pages/login', { 
-                title: 'Login', 
-                error: 'Usuário não encontrado' 
-            });
-        }
-
-        // Verificar senha
-        const isPasswordValid = await bcrypt.compare(password, account.password);
-
-        if (!isPasswordValid) {
-            return res.render('pages/login', { 
-                title: 'Login', 
-                error: 'Senha incorreta' 
-            });
-        }
-
-        // Verificar se a sessão existe
-        if (!req.session) {
-            console.error('Sessão não inicializada');
-            return res.status(500).render('pages/error', {
-                title: 'Erro de Sessão',
-                message: 'Não foi possível iniciar a sessão. Tente novamente.'
-            });
+      // Regenerar sessão de forma segura
+      req.session.regenerate(async (err) => {
+        if (err) {
+          console.error('Erro ao regenerar sessão:', err);
+          return res.status(500).render('pages/error', {
+            title: 'Erro de Sessão',
+            message: 'Não foi possível iniciar a sessão. Tente novamente.'
+          });
         }
 
         // Preparar dados do usuário para sessão
         const sessionUser: User = {
-            id: account.id,
-            username: account.username,
-            email: account.email,
-            role: account.role,
-            isActive: account.isActive,
-            lastLogin: account.lastLogin || new Date(),
-            createdAt: account.createdAt,
-            updatedAt: account.updatedAt
+          id: account.id,
+          username: account.username,
+          email: account.email,
+          role: account.role,
+          isActive: account.isActive,
+          lastLogin: account.lastLogin || new Date(),
+          createdAt: account.createdAt,
+          updatedAt: account.updatedAt
         };
 
-        // Atualizar sessão
+        // Definir usuário na sessão
         req.session.user = sessionUser;
 
-        // Atualizar último login
-        await prisma.account.update({
+        try {
+          // Atualizar último login
+          await prisma.account.update({
             where: { id: account.id },
             data: { lastLogin: new Date() }
-        });
+          });
 
-        res.redirect('/dashboard');
-    } catch (error) {
-        console.error('Erro no login:', error);
-        next(error);
-    }
+          // Redirecionar para dashboard
+          res.redirect('/dashboard');
+          resolve();
+        } catch (updateError) {
+          console.error('Erro ao atualizar último login:', updateError);
+          res.redirect('/dashboard');
+          resolve();
+        }
+      });
+    });
+  } catch (error) {
+    console.error('Erro no login:', error);
+    next(error);
+  }
 });
 
 export default router;
