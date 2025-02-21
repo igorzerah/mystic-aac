@@ -7,6 +7,8 @@ import session from 'express-session';
 import compression from 'compression';
 import methodOverride from 'method-override';
 import http from 'http';
+import Redis from 'ioredis';
+import * as connectRedisModule from 'connect-redis';
 
 // Middleware
 import { errorHandler } from './middleware/error-handler';
@@ -116,7 +118,7 @@ class Server {
     }
   }
 
-  private initializeMiddleware() {
+  private async initializeMiddleware() {
     // Segurança
     this.app.use(helmet({
       contentSecurityPolicy: {
@@ -126,7 +128,10 @@ class Server {
           styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
           imgSrc: ["'self'", "data:", "https:"]
         }
-      }
+      },
+      // Desabilitar algumas proteções para desenvolvimento/teste
+      hsts: this.config.nodeEnv === 'production',
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' }
     }));
 
     // Parsing
@@ -148,17 +153,125 @@ class Server {
       allowedHeaders: ['Content-Type', 'Authorization']
     }));
 
-    // Sessão com segredo do ambiente
-    this.app.use(session({
-      secret: this.config.sessionSecret,
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        httpOnly: true,
-        secure: this.config.nodeEnv === 'production',
-        maxAge: 24 * 60 * 60 * 1000 
+    // Servir arquivos estáticos ANTES de outras rotas
+    const staticOptions = {
+      dotfiles: 'ignore',
+      etag: true,
+      extensions: ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'svg'],
+      index: false,
+      maxAge: this.config.nodeEnv === 'production' ? '1d' : 0,
+      redirect: false,
+      setHeaders: (res: express.Response, path: string) => {
+        if (path.endsWith('.css')) {
+          res.setHeader('Content-Type', 'text/css');
+        } else if (path.endsWith('.js')) {
+          res.setHeader('Content-Type', 'application/javascript');
+        }
       }
-    }));
+    };
+
+    // Múltiplos diretórios de arquivos estáticos
+    this.app.use(express.static(path.join(__dirname, '../public'), staticOptions));
+    this.app.use('/images', express.static(path.join(__dirname, '../public/images'), staticOptions));
+    this.app.use('/js', express.static(path.join(__dirname, '../public/js'), staticOptions));
+
+    // Configuração do Redis com opções de reconexão
+    const redisClient = new Redis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      db: parseInt(process.env.REDIS_DB || '0', 10),
+      password: process.env.REDIS_PASSWORD,
+      retryStrategy: (times) => {
+        // Estratégia de reconexão exponencial
+        const delay = Math.min(times * 50, 2000);
+        logger.warn(`Tentativa de reconexão Redis (${times}). Próxima em ${delay}ms`);
+        return delay;
+      },
+      maxRetriesPerRequest: 3
+    });
+
+    redisClient.on('error', (err) => {
+      logger.error('Erro na conexão Redis:', err);
+    });
+
+    redisClient.on('connect', () => {
+      logger.info('Conexão Redis estabelecida com sucesso');
+    });
+
+    // Remover chamada de connect() para evitar conflitos
+    try {
+      // Verificar se o cliente já está conectado
+      if (redisClient.status !== 'ready') {
+        await new Promise<void>((resolve, reject) => {
+          redisClient.once('ready', () => resolve());
+          redisClient.once('error', (err) => reject(err));
+        });
+      }
+    } catch (error) {
+      logger.error('Falha ao conectar com Redis:', error);
+      logger.warn('Usando MemoryStore como fallback');
+    }
+
+    // Diagnóstico detalhado
+    logger.info('Módulo connect-redis - Tipo:', typeof connectRedisModule);
+    logger.info('Módulo connect-redis - Chaves:', JSON.stringify(Object.keys(connectRedisModule)));
+
+    try {
+      let RedisStore: any;
+
+      // Estratégias de importação
+      if (typeof connectRedisModule === 'function') {
+        RedisStore = connectRedisModule;
+      } 
+      else if (typeof (connectRedisModule as any).default === 'function') {
+        RedisStore = (connectRedisModule as any).default;
+      } 
+      else if (typeof (connectRedisModule as any).RedisStore === 'function') {
+        RedisStore = (connectRedisModule as any).RedisStore;
+      }
+      else {
+        throw new Error('Nenhuma estratégia de importação válida encontrada');
+      }
+
+      logger.info('Estratégia de importação:', RedisStore.name || 'Anônima');
+
+      // Inicialização do RedisStore
+      const redisStore = new RedisStore({ 
+        client: redisClient,
+        prefix: 'sess:',
+        // Configurações adicionais de segurança
+        ttl: 86400, // 1 dia em segundos
+        disableTouch: false // Permite atualizar a expiração da sessão
+      });
+      
+      this.app.use(session({
+        store: redisStore,
+        secret: this.config.sessionSecret,
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+          secure: this.config.nodeEnv === 'production', 
+          httpOnly: true,
+          maxAge: 1000 * 60 * 60 * 24 
+        }
+      }));
+    } catch (error) {
+      logger.error('Erro CRÍTICO ao configurar RedisStore:', error);
+      
+      // Fallback para MemoryStore com logs de aviso
+      logger.warn('🚨 AVISO CRÍTICO: Usando MemoryStore em produção. ALTAMENTE NÃO RECOMENDADO! 🚨');
+      
+      this.app.use(session({
+        secret: this.config.sessionSecret,
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+          secure: this.config.nodeEnv === 'production',
+          httpOnly: true,
+          maxAge: 1000 * 60 * 60 * 24
+        }
+      }));
+    }
 
     // Logging global
     this.app.use(globalLogger);
@@ -166,7 +279,6 @@ class Server {
     // Configurações do Express
     this.app.set('view engine', 'ejs');
     this.app.set('views', path.join(__dirname, '../views'));
-    this.app.use(express.static(path.join(__dirname, '../public')));
 
     // Compressão
     this.app.use(compression());
